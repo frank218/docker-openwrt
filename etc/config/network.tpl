@@ -8,18 +8,21 @@ config 'interface'    'loopback'
     option 'netmask'  '255.0.0.0'
  
 config 'interface'    'lan'
-    option 'type'     'bridge'
-    option 'ifname'   'eth0'
+    option 'ifname'   "${LAN_PARENT}"
     option 'proto'    'static'
     option 'ipaddr'   "${LAN_ADDR}"
     option 'gateway'  "${LAN_GW}"
     option 'netmask'  "${LAN_NETMASK}"
     option 'ip6assign' 64
 
+config 'interface'    'docker'
+    option 'ifname'   "${INT_IFNAME}"
+    option 'proto'    'dhcp'
+
 config 'interface'    'wan'
-    option 'ifname'   'eth1'
+    option 'ifname'   'enp4s0'
     option 'proto'    'dhcp'
 
 config 'interface'    'wan6'
-    option 'ifname'   'eth1'
+    option 'ifname'   'enp4s0'
     option 'proto'    'dhcpv6'

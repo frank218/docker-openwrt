@@ -39,17 +39,19 @@ _cleanup() {
 	docker stop $CONTAINER >/dev/null
 	echo "* cleaning up netns symlink"
 	sudo rm -rf /var/run/netns/$CONTAINER
-	echo "* removing host $LAN_DRIVER interface"
-	if [[ $LAN_DRIVER != "bridge" ]] ; then
-		sudo ip link del dev $LAN_IFACE
-	elif [[ $LAN_PARENT =~ \. ]] ; then
-		sudo ip link del dev $LAN_PARENT
+	if [[ $LAN_DRIVER != "direct" ]] ; then
+		echo "* removing host $LAN_DRIVER interface"
+		if [[ $LAN_DRIVER != "bridge" ]] ; then
+			sudo ip link del dev $LAN_IFACE
+		elif [[ $LAN_PARENT =~ \. ]] ; then
+			sudo ip link del dev $LAN_PARENT
+		fi
 	fi
 	echo -ne "* finished"
 }
 
 _gen_config() {
-	echo "* generating network config"
+	echo "* generating OpenWRT config"
 	set -a
 	_get_phy_from_dev
 	source $CONFIG_FILE
@@ -61,31 +63,44 @@ _gen_config() {
 }
 
 _init_network() {
-	echo "* setting up docker network"
-	local LAN_ARGS
-	case $LAN_DRIVER in
-		bridge)
-			LAN_ARGS=""
-		;;
-		macvlan)
-			LAN_ARGS="-o parent=$LAN_PARENT"
-		;;
-		ipvlan)
-			LAN_ARGS="-o parent=$LAN_PARENT -o ipvlan_mode=l2"
-		;;
-		*)
-			echo "invalid choice for LAN network driver"
-			exit 1
-		;;
-	esac
-	docker network create --driver $LAN_DRIVER \
-		$LAN_ARGS \
-		--subnet $LAN_SUBNET \
-		$LAN_NAME || exit 1
+	if [[ "${LAN_DRIVER}" != "direct" ]] ; then
+		echo "* setting up docker network for LAN"
+		local LAN_ARGS
+		case $LAN_DRIVER in
+			bridge)
+				LAN_ARGS=""
+			;;
+			macvlan)
+				LAN_ARGS="-o parent=$LAN_PARENT"
+			;;
+			ipvlan)
+				LAN_ARGS="-o parent=$LAN_PARENT -o ipvlan_mode=l2"
+			;;
+			*)
+				echo "invalid choice for LAN network driver"
+				exit 1
+			;;
+		esac
+		docker network create --driver $LAN_DRIVER \
+			$LAN_ARGS \
+			--subnet $LAN_SUBNET \
+			$LAN_NAME || exit 1
+	fi
 
-	docker network create --driver $WAN_DRIVER \
-		-o parent=$WAN_PARENT \
-		$WAN_NAME || exit 1
+	if [[ ${INT_NAME} ]] && [[ "${INT_NAME}" != "bridge" ]] ; then
+		echo "* setting up docker network for internal communication"
+		docker network create --driver bridge \
+			--subnet $INT_SUBNET \
+			--internal \
+			$INT_NAME || exit 1
+	fi
+
+	if [[ "${WAN_DRIVER}" != "direct" ]] ; then
+		echo "* setting up docker network for WAN"
+		docker network create --driver $WAN_DRIVER \
+			-o parent=$WAN_PARENT \
+			$WAN_NAME || exit 1
+	fi
 }
 
 _set_hairpin() {
@@ -113,17 +128,32 @@ _create_or_start_container() {
 	else
 		_init_network
 		echo "* creating container $CONTAINER"
+		local lanargs=""
+		if [[ "${LAN_DRIVER}" != "direct" ]] ; then
+			lanargs="--network $LAN_NAME --ip $LAN_ADDR"
+		else
+			if [[ ${INT_NAME} ]] ; then 
+				if [[ "${INT_NAME}" != "bridge" ]] ; then
+					lanargs="--network $INT_NAME --ip $INT_ADDR"
+					# else leave lanargs empty
+				fi
+			else
+				lanargs="--network none"
+			fi
+		fi
 		docker create \
-			--network $LAN_NAME \
+		    $lanargs \
 			--cap-add NET_ADMIN \
 			--cap-add NET_RAW \
 			--hostname openwrt \
-			--ip $LAN_ADDR \
 			--sysctl net.netfilter.nf_conntrack_acct=1 \
 			--sysctl net.ipv6.conf.all.disable_ipv6=0 \
 			--sysctl net.ipv6.conf.all.forwarding=1 \
-			--name $CONTAINER $IMAGE:$TAG >/dev/null
-		docker network connect $WAN_NAME $CONTAINER
+			--name $CONTAINER $IMAGE:$TAG >/dev/null || exit 1
+
+		if [[ "${WAN_DRIVER}" != "direct" ]] ; then
+			docker network connect $WAN_NAME $CONTAINER
+		fi
 
 		_gen_config
 		docker start $CONTAINER
@@ -139,6 +169,16 @@ _reload_fw() {
 			done
 		done
 		/sbin/fw3 -q restart'
+	
+	if [[ "${INT_NAME}" = "bridge" ]] ; then
+		# docker networks can't do dhcp, so we have to emulate this
+		echo * resetting $INT_IFNAME
+		sleep 5
+		local addr=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTAINER)
+		local ippl=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPPrefixLen}}{{end}}' $CONTAINER)
+		docker exec -it $CONTAINER ip addr add $addr"/"$ippl dev $INT_IFNAME
+		docker exec -it $CONTAINER ip link set $INT_IFNAME up
+	fi
 }
 
 _prepare_wifi() {
@@ -178,6 +218,11 @@ _prepare_network() {
 			fi
 			sudo ip link set $LAN_PARENT master $LAN_IFACE
 		;;
+		direct)
+			# move the whole interface to the container, making it unavailable to the host
+			sudo ip link set dev $LAN_PARENT netns $CONTAINER
+			sudo ip netns exec "$CONTAINER" ip link set "$LAN_PARENT" up
+		;;
 		*)
 			echo "invalid network driver type, must be 'bridge' or 'macvlan'"
 			exit 1
@@ -195,10 +240,16 @@ _prepare_network() {
 			uci -q set network.wan.broadcast=1
 			uci -q set network.wan.clientid=${client_id}
 			uci commit"
+	elif [[ "${WAN_DRIVER}" = "direct" ]] ; then
+			# move the whole interface to the container, making it unavailable to the host
+			sudo ip link set dev $WAN_PARENT netns $CONTAINER
+			sudo ip netns exec "$CONTAINER" ip link set "$WAN_PARENT" up
 	fi
 
-	echo "* getting address via DHCP"
-	sudo dhcpcd -q $LAN_IFACE
+	if [[ "${LAN_DRIVER}" != "direct" ]] ; then
+		echo "* getting address via DHCP"
+		sudo dhcpcd -q $LAN_IFACE
+	fi
 }
 
 main() {
@@ -207,11 +258,17 @@ main() {
 
 	pid=$(docker inspect -f '{{.State.Pid}}' $CONTAINER)
 
-	echo "* creating netns symlink '$CONTAINER'"
+	echo "* creating netns symlink '$CONTAINER' (pid '$pid')"
 	sudo mkdir -p /var/run/netns
 	sudo ln -sf /proc/$pid/ns/net /var/run/netns/$CONTAINER
 
-	_prepare_wifi
+	if [ "$WIFI_ENABLED" = true ] ; then
+		_prepare_wifi
+
+	else
+		echo "* skipping WiFi setup"
+
+	fi
 	_prepare_network
 
 	_reload_fw
