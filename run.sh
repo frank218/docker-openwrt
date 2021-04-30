@@ -117,6 +117,22 @@ _set_hairpin() {
 }
 
 _create_or_start_container() {
+	local retry=10
+	while [[ $retry -gt 0 ]] ;
+	do
+		if [[ ! -e /var/run/docker.sock ]] ; then
+			echo "docker.sock not found - waiting $retry more seconds for docker daemon to come up..."
+			sleep 1
+			((retry-=1))
+		else
+			break
+		fi
+	done
+	if [[ $retry = 0 ]] ; then
+		echo "Error: could not connect to docker daemon - exiting."
+		exit 1
+	fi
+
 	if ! docker inspect $IMAGE:$TAG >/dev/null 2>&1; then
 		echo "no image '$IMAGE:$TAG' found, did you forget to run 'make build'?"
 		exit 1
