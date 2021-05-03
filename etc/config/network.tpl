@@ -15,6 +15,14 @@ config 'interface'    'lan'
     option 'netmask'  "${LAN_NETMASK}"
     option 'ip6assign' 64
 
+config 'interface'    'aux'
+    option 'ifname'   "${AUX_PARENT}"
+    option 'proto'    'static'
+    option 'ipaddr'   "${AUX_ADDR}"
+    option 'gateway'  "${AUX_GW}"
+    option 'netmask'  "${AUX_NETMASK}"
+    option 'ip6assign' 64
+
 config 'interface'    'docker'
     option 'ifname'   "${INT_IFNAME}"
     option 'proto'    'dhcp'

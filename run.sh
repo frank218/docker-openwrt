@@ -240,7 +240,47 @@ _prepare_network() {
 			sudo ip netns exec "$CONTAINER" ip link set "$LAN_PARENT" up
 		;;
 		*)
-			echo "invalid network driver type, must be 'bridge' or 'macvlan'"
+			echo "error: invalid LAN network driver type"
+			exit 1
+		;;
+	esac
+
+	case $AUX_DRIVER in
+		macvlan)
+			echo "Warning: macvlan mode for AUX interface not supported"
+			echo "* setting up host $AUX_DRIVER interface"
+			AUX_IFACE=macvlan0
+			sudo ip link add $AUX_IFACE link $AUX_PARENT type $AUX_DRIVER mode bridge
+			sudo ip link set $AUX_IFACE up
+			sudo ip route add $AUX_SUBNET dev $AUX_IFACE
+		;;
+		ipvlan)
+			echo "Warning: ipvlan mode for AUX interface not supported"
+			echo "* setting up host $AUX_DRIVER interface"
+			AUX_IFACE=ipvlan0
+			sudo ip link add $AUX_IFACE link $AUX_PARENT type $AUX_DRIVER mode l2
+			sudo ip link set $AUX_IFACE up
+			sudo ip route add $AUX_SUBNET dev $AUX_IFACE
+		;;
+		bridge)
+			echo "Warning: bridge mode for AUX interface not supported"
+			AUX_ID=$(docker network inspect $AUX_NAME -f "{{.Id}}")
+			AUX_IFACE=br-${AUX_ID:0:12}
+
+			# test if $AUX_PARENT is a VLAN of $WAN_PARENT, create it if it doesn't exist and add it to the bridge
+			local lan_array=(${AUX_PARENT//./ })
+			if [[ ${lan_array[0]} = $WAN_PARENT ]] && ! ip link show $AUX_PARENT >/dev/null 2>&1 ; then
+				sudo ip link add link ${lan_array[0]} name $AUX_PARENT type vlan id ${lan_array[1]}
+			fi
+			sudo ip link set $AUX_PARENT master $AUX_IFACE
+		;;
+		direct)
+			# move the whole interface to the container, making it unavailable to the host
+			sudo ip link set dev $AUX_PARENT netns $CONTAINER
+			sudo ip netns exec "$CONTAINER" ip link set "$AUX_PARENT" up
+		;;
+		*)
+			echo "error: invalid AUX network driver type"
 			exit 1
 		;;
 	esac
