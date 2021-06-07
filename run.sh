@@ -11,6 +11,7 @@ SCRIPT_DIR=$(cd $(dirname $0) && pwd )
 DEFAULT_CONFIG_FILE=$SCRIPT_DIR/openwrt.conf
 CONFIG_FILE=${1:-$DEFAULT_CONFIG_FILE}
 source $CONFIG_FILE 2>/dev/null || { _usage; exit 1; }
+BACKUP_CONFIG_FILE=config.tar.gz
 
 _nmcli() {
 	type nmcli >/dev/null 2>&1
@@ -51,14 +52,20 @@ _cleanup() {
 }
 
 _gen_config() {
-	echo "* generating OpenWRT config"
-	set -a
-	_get_phy_from_dev
-	source $CONFIG_FILE
-	for file in etc/config/*.tpl; do
-		envsubst <${file} >${file%.tpl}
-		docker cp ${file%.tpl} $CONTAINER:/${file%.tpl}
-	done
+	if [[ -e $SCRIPT_DIR/$BACKUP_CONFIG_FILE ]] ; then
+		echo "* restoring backup config $BACKUP_CONFIG_FILE"
+			docker cp -L ${$SCRIPT_DIR/BACKUP_CONFIG_FILE} $CONTAINER:/tmp
+			#sysupgrade will be called after the container has been started
+	else
+		echo "* generating OpenWRT config"
+		set -a
+		_get_phy_from_dev
+		source $CONFIG_FILE
+		for file in etc/config/*.tpl; do
+			envsubst <${file} >${file%.tpl}
+			docker cp ${file%.tpl} $CONTAINER:/${file%.tpl}
+		done
+	fi
 	set +a
 }
 
@@ -173,6 +180,11 @@ _create_or_start_container() {
 
 		_gen_config
 		docker start $CONTAINER
+		if [[ -e $SCRIPT_DIR/$BACKUP_CONFIG_FILE ]] ; then
+			echo "* triggering system restore"
+			docker exec -it $CONTAINER sysupgrade --restore-backup /tmp/$BACKUP_CONFIG_FILE
+			docker restart $CONTAINER
+		fi
 	fi
 }
 
